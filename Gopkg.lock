@@ -64,13 +64,14 @@
   name = "layeh.com/radius"
   packages = [
     ".",
-    "rfc2865"
+    "rfc2865",
+    "rfc2869"
   ]
   revision = "d653b62e3d1e7a585978a51718582c6aed9c056c"
 
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "0da32bc6659499220790d1e0c2e5513f252163d98a3d250082e86c8911b0fc89"
+  inputs-digest = "58206900083e9e21c05a0daf74dcb5d1f5c77ef82b34b370ce82503aea49f36f"
   solver-name = "gps-cdcl"
   solver-version = 1

@@ -5,6 +5,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/md5"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -24,6 +26,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"layeh.com/radius"
 	"layeh.com/radius/rfc2865"
+	"layeh.com/radius/rfc2869"
 )
 
 type OpenFlowContext struct {
@@ -63,6 +66,8 @@ type App struct {
 	OfTeeApi string `envconfig:"OFTEE_API" default:"http://127.0.0.1:8002" desc:"HOST:PORT on which to connect to OFTEE REST API"`
 	ListenOn string `envconfig:"LISTEN_ON" default:"127.0.0.1:8005" desc:"HOST:PORT on which to listen for packets from oftee"`
 	RadiusAt string `envconfig:"RADIUS_AT" default:"127.0.0.1:1812" desc:"HOST:PORT of radius server to use"`
+
+	SharedSecret string `envconfig:"SHARED_SECRET" required:"true" desc:"shared secret to use when communicating to radius"`
 
 	queue chan *OpenFlowPacketInMessage
 }
@@ -158,17 +163,11 @@ func (app *App) PacketProcessor() {
 			WithFields(log.Fields{
 				"context":   message.Context.String(),
 				"header":    message.Header,
-				"packet_in": message.PacketIn,
+				"packet_in": fmt.Sprintf("%02x", message.PacketIn.Data),
 			}).
 			Debug("PROCESS")
 
 		packet := gopacket.NewPacket(message.PacketIn.Data, layers.LayerTypeEthernet, gopacket.Default)
-		log.
-			WithFields(log.Fields{
-				"packet": packet,
-				"data":   fmt.Sprintf("%0x2", message.PacketIn.Data),
-			}).
-			Debug("packet")
 		eapol := packet.Layer(layers.LayerTypeEAPOL)
 		if eapol == nil {
 			names := make([]string, len(packet.Layers()))
@@ -214,16 +213,6 @@ func (app *App) PacketProcessor() {
 
 			buf := gopacket.NewSerializeBuffer()
 			opts := gopacket.SerializeOptions{}
-			//gopacket.SerializeLayers(buf, opts,
-			//	&layers.Ethernet{},
-			//	&layers.IPv4{},
-			//	&layers.TCP{},
-			//	gopacket.Payload([]byte{1, 2, 3, 4}))
-			//packetData := buf.Bytes()
-			//app.emit(message.Context.DatapathID, ofp.PortNo(message.Context.Port), packetData)
-
-			//buf = gopacket.NewSerializeBuffer()
-			//opts = gopacket.SerializeOptions{}
 			gopacket.SerializeLayers(buf, opts,
 				&layers.Ethernet{
 					SrcMAC: net.HardwareAddr{0xc0, 0xff, 0xee, 0xc0, 0xff, 0xee},
@@ -244,7 +233,6 @@ func (app *App) PacketProcessor() {
 					Length:   5,
 					TypeData: []byte{0},
 				})
-			// &gopacket.Payload{uint8(layers.EAPTypeIdentity)})
 			log.Debugf("LEN: %d %02x", len(buf.Bytes()), buf.Bytes())
 			app.emit(message.Context.DatapathID, ofp.PortNo(message.Context.Port), buf.Bytes())
 		case layers.EAPOLTypeEAP:
@@ -256,23 +244,175 @@ func (app *App) PacketProcessor() {
 			case layers.EAPTypeNACK:
 				log.Debug("NAK")
 			case layers.EAPTypeIdentity:
-				log.Debug("IDENTITY")
-				log.Debug(string(eap.TypeData))
-			}
-			rad := radius.New(radius.CodeAccessRequest, []byte(`SECRET`))
-			rfc2865.UserName_SetString(rad, string(eap.TypeData))
-			rfc2865.NASIdentifier_Get(rad)
-			//rfc.UserPassword_SetString(rad, "mypassword")
-			ctx := context.Background()
-			log.
-				WithFields(log.Fields{
-					"radius": app.RadiusAt,
-				}).
-				Debug("SENDING TO RAD")
-			response, _ := radius.Exchange(ctx, rad, app.RadiusAt)
+				log.
+					WithFields(log.Fields{
+						"username": string(eap.TypeData),
+					}).
+					Debug("IDENTITY")
 
-			log.Debugf("%+v", response)
+					// 	// Now that we have a username, send a challenge back to
+					// 	// the supplicant
+					// 	buf := gopacket.NewSerializeBuffer()
+					// 	opts := gopacket.SerializeOptions{}
+					// 	gopacket.SerializeLayers(buf, opts,
+					// 		&layers.Ethernet{
+					// 			SrcMAC:       net.HardwareAddr{0xc0, 0xff, 0xee, 0xc0, 0xff, 0xee},
+					// 			DstMAC:       net.HardwareAddr{0x01, 0x80, 0xC2, 0x00, 0x00, 0x03},
+					// 			EthernetType: layers.EthernetTypeEAPOL,
+					// 			Length:       0,
+					// 		},
+					// 		&layers.EAPOL{
+					// 			Version: e.Version,
+					// 			Type:    layers.EAPOLTypeEAP,
+					// 			Length:  4,
+					// 		},
+					// 		&layers.EAP{
+					// 			Id:       1,
+					// 			Type:     layers.EAPTypeOTP,
+					// 			Code:     layers.EAPCodeRequest,
+					// 			Length:   5,
+					// 			TypeData: []byte{0},
+					// 		})
+					// 	log.Debugf("LEN: %d %02x", len(buf.Bytes()), buf.Bytes())
+					// 	app.emit(message.Context.DatapathID, ofp.PortNo(message.Context.Port), buf.Bytes())
+					// 	return
+				// }
+
+				log.
+					WithFields(log.Fields{
+						"secret": app.SharedSecret,
+					}).
+					Debug("DON'T TELL")
+				rad := radius.New(radius.CodeAccessRequest, []byte(app.SharedSecret))
+				rad.Identifier = eap.Id
+				rfc2865.UserName_SetString(rad, string(eap.TypeData))
+				rad.Add(79, packet.Layer(layers.LayerTypeEAP).LayerContents())
+				zero := make([]byte, 16)
+				copy(rad.Authenticator[0:16], zero[0:16])
+				have := rfc2869.MessageAuthenticator_Get(rad)
+				if have != nil {
+					log.
+						WithFields(log.Fields{
+							"auth": fmt.Sprintf("%02x", have),
+						}).
+						Debug("HAVE AUTH")
+					rfc2869.MessageAuthenticator_Set(rad, zero)
+				} else {
+					log.Debug("ADD AUTH")
+					rfc2869.MessageAuthenticator_Add(rad, zero)
+
+				}
+
+				hash := hmac.New(md5.New, []byte(app.SharedSecret))
+				encode, err := rad.Encode()
+				if err != nil {
+					log.
+						WithError(err).
+						Error("NO ENCODE PACKET")
+				}
+				log.
+					WithFields(log.Fields{
+						"RADIUS": fmt.Sprintf("%02x", encode),
+					}).
+					Debug("RAD PACKET")
+				hash.Write(encode)
+				a := hash.Sum(nil)
+				rfc2869.MessageAuthenticator_Set(rad, a)
+				encode, err = rad.Encode()
+				if err != nil {
+					log.
+						WithError(err).
+						Error("NO ENCODE PACKET 2")
+				}
+				log.
+					WithFields(log.Fields{
+						"RADIUS": fmt.Sprintf("%02x", encode),
+					}).
+					Debug("RAD PACKET 2")
+				log.
+					WithFields(log.Fields{
+						"a.len": len(a),
+						"a":     fmt.Sprintf("%02x", a),
+						"auth":  fmt.Sprintf("%+v", rad.Authenticator),
+					}).
+					Debug("INFO FOR ME")
+				// rfc2865.UserPassword_SetString(rad, "password")
+				log.Debug("ABOUT TO SEND TO RADIUS")
+				to, _ := time.ParseDuration("30s")
+				ctx, _ := context.WithTimeout(context.Background(), to)
+				response, err := radius.Exchange(ctx, rad, app.RadiusAt)
+				log.Debug("HAVE RESPONSE")
+				if err != nil {
+					log.
+						WithError(err).
+						WithFields(log.Fields{
+							"server": app.RadiusAt,
+						}).
+						Error("FAILED")
+					return
+				} else {
+					log.
+						WithFields(log.Fields{
+							"radius": app.RadiusAt,
+						}).
+						Debug("SENDING TO RAD")
+				}
+				encode, err = response.Encode()
+				if err != nil {
+					log.
+						WithError(err).
+						Error("NO ENCODE PACKET 2")
+					return
+				}
+				log.
+					WithFields(log.Fields{
+						"response": fmt.Sprintf("%02x", encode),
+					}).
+					Debug("RESPONSE")
+
+				// We have a response with a bundled EAP packet,
+				// now to emit that back to the suplicant
+				eap := &layers.EAP{}
+				err = eap.DecodeFromBytes(response.Get(79), nil)
+				if err != nil {
+					log.
+						WithError(err).
+						Error("NO DECODE FOR YOU")
+				}
+				attr := response.Get(79)
+				log.
+					WithFields(log.Fields{
+						"eap":  eap,
+						"attr": fmt.Sprintf("%02x", attr),
+					}).
+					Debug("EAP VALUE")
+
+				buf := gopacket.NewSerializeBuffer()
+				opts := gopacket.SerializeOptions{}
+				gopacket.SerializeLayers(buf, opts,
+					&layers.Ethernet{
+						SrcMAC: net.HardwareAddr{0xc0, 0xff, 0xee, 0xc0, 0xff, 0xee},
+						DstMAC: net.HardwareAddr{0x01, 0x80, 0xC2, 0x00, 0x00, 0x03},
+						// DstMAC:       eth.SrcMAC,
+						EthernetType: layers.EthernetTypeEAPOL,
+						Length:       0,
+					},
+					&layers.EAPOL{
+						Version: e.Version,
+						Type:    layers.EAPOLTypeEAP,
+						Length:  eap.Length,
+					},
+					eap)
+				log.
+					WithFields(log.Fields{
+						"len":  len(buf.Bytes()),
+						"data": fmt.Sprintf("%02x", buf.Bytes()),
+					}).
+					Debug("SENDING TO SUP")
+				app.emit(message.Context.DatapathID, ofp.PortNo(message.Context.Port), buf.Bytes())
+			}
 		case layers.EAPOLTypeLogOff:
+			log.Debug("EAPOL TYPE LOGOFF")
 		default:
 			log.Debug(e.Type.String())
 		}
@@ -318,9 +458,9 @@ func (app *App) EapPacketHandler(resp http.ResponseWriter, req *http.Request) {
 
 	log.
 		WithFields(log.Fields{
-			"context": context.String(),
+			"context":  context.String(),
 			"openflow": fmt.Sprintf("%02x", data[context.Len():context.Len()+uint64(header.Length)]),
-			"packet": fmt.Sprintf("%02x", packetIn.Data),
+			"packet":   fmt.Sprintf("%02x", packetIn.Data),
 		}).
 		Debug("BREAKDOWN")
 
