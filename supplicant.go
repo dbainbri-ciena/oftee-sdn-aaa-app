@@ -269,9 +269,9 @@ func (sup *Supplicant) SupplicantRadiusRequestsSender(AddressOfRadiusServer stri
 					}).
 					Debug("Sending to RADIUS")
 			}
-			ctx, _ := context.WithTimeout(context.Background(), RequestTimeOut)
+			ctx, cancel := context.WithTimeout(context.Background(), RequestTimeOut)
 			response, err = radius.Exchange(ctx, request.Packet, AddressOfRadiusServer)
-			ctx.Done()
+			cancel()
 			if err != nil {
 				encode, _ := request.Packet.Encode()
 				log.
