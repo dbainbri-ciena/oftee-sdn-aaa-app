@@ -252,27 +252,28 @@ func (sup *Supplicant) SupplicantRadiusRequestsSender(AddressOfRadiusServer stri
 	var request *AugmentedRadiusPacket
 	var response *radius.Packet
 	var err error
-	var encode []byte
 
 	for {
-		ctx, _ := context.WithTimeout(context.Background(), RequestTimeOut)
 		err = nil
 		select {
 		case <-sup.Destroy:
 			return
 		case request = <-sup.RadiusRequestQueue:
 			if log.GetLevel() >= log.DebugLevel {
-				encode, _ = request.Packet.Encode()
+				encode, _ := request.Packet.Encode()
 				log.
 					WithFields(log.Fields{
 						"code":       request.Packet.Code.String(),
 						"attributes": request.Packet.Attributes,
 						"request":    fmt.Sprintf("%02x", encode),
 					}).
-					Error("Sending to RADIUS")
+					Debug("Sending to RADIUS")
 			}
+			ctx, _ := context.WithTimeout(context.Background(), RequestTimeOut)
 			response, err = radius.Exchange(ctx, request.Packet, AddressOfRadiusServer)
+			ctx.Done()
 			if err != nil {
+				encode, _ := request.Packet.Encode()
 				log.
 					WithError(err).
 					WithFields(log.Fields{
@@ -284,14 +285,17 @@ func (sup *Supplicant) SupplicantRadiusRequestsSender(AddressOfRadiusServer stri
 				continue
 			}
 
-			encode, _ = response.Encode()
-			log.
-				WithFields(log.Fields{
-					"code":       response.Code.String(),
-					"attributes": response.Attributes,
-					"request":    fmt.Sprintf("%02x", encode),
-				}).
-				Error("Queuing RADIUS response for processing")
+			if log.GetLevel() >= log.DebugLevel {
+				encode, _ := response.Encode()
+				log.
+					WithFields(log.Fields{
+						"code":       response.Code.String(),
+						"attributes": response.Attributes,
+						"request":    fmt.Sprintf("%02x", encode),
+					}).
+					Debug("Queuing RADIUS response for processing")
+			}
+
 			RadiusResponseQueue <- &AugmentedRadiusPacket{
 				Supplicant:   sup,
 				EAPOLVersion: request.EAPOLVersion,
